@@ -1,0 +1,10 @@
+{
+  "WF_SPLITS": 5,
+  "WF_TEST_SIZE": 63,
+  "SAVE_FOLD_MODELS": false,
+  "HPO_TRIALS": 40,
+  "HPO_TIMEOUT": 0,
+  "HPO_METRIC": "sharpe",
+  "HPO_N_STARTUP": 5,
+  "HPO_WARMUP_STEPS": 1
+}

@@ -1,0 +1,32 @@
+data:
+  symbol: "SPY"
+  start: "2018-01-01"
+  end: "2024-12-31"
+  interval: "1d"
+fees:
+  commission: 0.0002
+  slippage_bps: 1.0
+risk:
+  target_vol_annual: 0.15
+  max_dd: 0.25
+strategy:
+  name: "sma_crossover"   # options: sma_crossover, rf, logreg, xgb, lgbm
+  params:
+    ma_fast: 20
+    ma_slow: 50
+models:
+  rf:
+    n_estimators: 200
+    max_depth: 6
+  logreg:
+    C: 1.0
+  xgb:
+    n_estimators: 300
+    learning_rate: 0.05
+  lgbm:
+    n_estimators: 300
+    learning_rate: 0.05
+walkforward:
+  n_splits: 5
+  min_train: "2018-01-01"
+  embargo_days: 5

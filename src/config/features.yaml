@@ -1,0 +1,15 @@
+
+# Özellik tanımları
+bars:
+  timeframe: 1m
+indicators:
+  - name: sma_20
+    kind: sma
+    window: 20
+  - name: rsi_14
+    kind: rsi
+    window: 14
+microstructure:
+  - name: ob_imbalance
+    kind: lob_imb
+    window: 10

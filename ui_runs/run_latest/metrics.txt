@@ -1,0 +1,3 @@
+total_return: 85.365871
+sharpe: 0.597505
+maxdd: -0.308000

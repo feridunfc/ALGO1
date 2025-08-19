@@ -1,0 +1,5 @@
+git checkout -b hotfix/committee-v2.9
+git apply --whitespace=fix committee_hotfix_v2_9.patch
+# (Gerekirse) yeni dosyaları git’e ekle
+git add -A
+git commit -m "hotfix(v2.9): committee pipeline + incremental WF + drift guard + OMS + UI page"

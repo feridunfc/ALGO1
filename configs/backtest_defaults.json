@@ -1,0 +1,21 @@
+{
+    "execution": {
+        "fee_bps": 0.0005,
+        "fee_fixed": 0.0,
+        "slippage_bps": 0.0002
+    },
+    "risk": {
+        "position_sizing": "fixed",
+        "fixed_pct": 0.1,
+        "vol_target": 0.1,
+        "lookback": 252,
+        "pct_risk_per_trade": 0.01
+    },
+    "stop": {
+        "enable": true,
+        "initial_pct": 0.1,
+        "trailing": true,
+        "trailing_pct": 0.05
+    },
+    "allow_short": false
+}

@@ -1,0 +1,27 @@
+{
+    "wfa": {
+        "n_splits": 3,
+        "train_window": 252,
+        "test_window": 63
+    },
+    "optimization": {
+        "method": "grid",
+        "max_evals": 100
+    },
+    "execution": {
+        "fee_bps": 0.0005,
+        "fee_fixed": 0.0,
+        "slippage_bps": 0.0002
+    },
+    "risk": {
+        "use_atr": true,
+        "pct_risk_per_trade": 0.01,
+        "max_exposure_pct": 0.5,
+        "max_open_positions": 10
+    },
+    "stop": {
+        "initial_pct": 3.0,
+        "trailing": true,
+        "trailing_pct": 0.05
+    }
+}

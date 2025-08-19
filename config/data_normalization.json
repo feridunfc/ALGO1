@@ -1,0 +1,7 @@
+{
+  "nan_policy": "ffill",
+  "scaler": "zscore",
+  "tz": "UTC",
+  "ensure_monotonic": true,
+  "ensure_unique_index": true
+}

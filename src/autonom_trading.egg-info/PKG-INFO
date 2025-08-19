@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: autonom-trading
+Version: 2.9.13
+Requires-Python: >=3.9
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: scikit-learn>=1.2
+Requires-Dist: yfinance>=0.2.40
+Requires-Dist: streamlit>=1.31

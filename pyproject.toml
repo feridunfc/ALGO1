@@ -1,0 +1,19 @@
+
+[project]
+name = "eventbus-hotfix"
+version = "2.9.13"
+description = "Production-grade EventBus & Event System hotfix for trading platform"
+readme = "README_HOTFIX.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=1.10; python_version<'3.12'",
+    "pydantic>=2.0; python_version>='3.12'",
+]
+
+[build-system]
+requires = ["setuptools>=67"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]

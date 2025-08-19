@@ -1,0 +1,13 @@
+
+# Borsa spesifik ayarlar
+binance:
+  rest_base: https://api.binance.com
+  ws_base: wss://stream.binance.com:9443
+  rate_limit_per_min: 1200
+coinbase:
+  rest_base: https://api.exchange.coinbase.com
+  ws_base: wss://ws-feed.exchange.coinbase.com
+  rate_limit_per_min: 600
+bist:
+  fix: true
+  mic: XIST
