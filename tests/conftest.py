@@ -1,24 +1,50 @@
-
-import os
-import sys
-import asyncio
+# conftest.py (root seviyesinde)
 import pytest
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone
+from pathlib import Path
 
-# Ensure project root and src/ on sys.path
-ROOT = os.path.abspath(os.getcwd())
-SRC = os.path.join(ROOT, "src")
-for p in (ROOT, SRC):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+from src.core.backtest_engine import BacktestEngine
+from src.backend.eventbus import EventBus
+from src.backend.risk_engine import RiskEngine
 
-# Asyncio mode (pytest-asyncio >=0.21 uses auto by default; keep explicit for safety)
-def pytest_configure(config):
-    config.addinivalue_line("markers", "asyncio: mark test as asyncio-compatible")
 
 @pytest.fixture(scope="session")
-def live_server():
-    """Return live UI URL from env var LIVE_UI_URL. Skip UI tests if not set."""
-    url = os.environ.get("LIVE_UI_URL")
-    if not url:
-        pytest.skip("LIVE_UI_URL not set; skipping UI tests")
-    return url
+def test_data_dir() -> Path:
+    """Test verilerinin bulunduğu klasörü döndürür."""
+    return Path(__file__).parent / "data"
+
+
+@pytest.fixture(scope="function")
+def dummy_dataframe():
+    """NaN içermeyen basit bir DataFrame örneği."""
+    return pd.DataFrame({
+        "timestamp": pd.date_range(datetime.now(timezone.utc), periods=5, freq="D"),
+        "price": np.linspace(100, 105, 5),
+        "volume": [10, 20, 30, 40, 50],
+    })
+
+
+@pytest.fixture(scope="function")
+def event_bus():
+    """Her test için izole EventBus sağlar."""
+    return EventBus()
+
+
+@pytest.fixture(scope="function")
+def risk_engine():
+    """Varsayılan parametrelerle risk motoru döndürür."""
+    return RiskEngine(max_position_size=1000, max_notional=1e6)
+
+
+@pytest.fixture(scope="function")
+def backtest_engine(event_bus, risk_engine):
+    """Basit bir backtest engine fixture."""
+    return BacktestEngine(event_bus=event_bus, risk_engine=risk_engine)
+
+
+def pytest_configure(config):
+    """Custom mark'ları register et (ör. ui harici)."""
+    config.addinivalue_line("markers", "backend: backend testleri için")
+    config.addinivalue_line("markers", "integration: entegrasyon testleri için")

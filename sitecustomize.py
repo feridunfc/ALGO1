@@ -3,6 +3,14 @@ import sys, asyncio, os
 
 # Python her çalışmada otomatik yükler (sys.path içinde kök varsa).
 import sys, pathlib
+# sitecustomize.py  (proje kökünde)
+import sys, asyncio
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 root = pathlib.Path(__file__).resolve().parent
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
