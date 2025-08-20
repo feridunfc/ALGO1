@@ -1,8 +1,8 @@
-
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Dict, List
+from datetime import datetime, timezone
+
 
 @dataclass
 class Fill:
@@ -12,6 +12,7 @@ class Fill:
     qty: float
     price: float
     slippage_bps: float
+
 
 @dataclass
 class PaperExecutionSimulator:
@@ -28,12 +29,20 @@ class PaperExecutionSimulator:
     def _apply_commission(self, notional: float) -> float:
         return notional * (self.commission_bps / 10_000.0)
 
-    def submit_order(self, symbol: str, side: str, qty: float, price: float, slippage_bps: float = 0.0) -> bool:
-        exec_price = price * (1 + (slippage_bps/10_000.0) * (1 if side.upper() == "BUY" else -1))
+    def submit_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        price: float,
+        slippage_bps: float = 0.0,
+    ) -> bool:
+        side_u = side.upper()
+        exec_price = price * (1 + (slippage_bps / 10_000.0) * (1 if side_u == "BUY" else -1))
         notional = qty * exec_price
         fee = self._apply_commission(abs(notional))
 
-        if side.upper() == "BUY":
+        if side_u == "BUY":
             if self.cash < notional + fee:  # insufficient cash
                 return False
             self.cash -= (notional + fee)
@@ -42,7 +51,10 @@ class PaperExecutionSimulator:
             self.positions[symbol] = self.positions.get(symbol, 0.0) - qty
             self.cash += (abs(notional) - fee)
 
-        self.fills.append(Fill(datetime.utcnow(), symbol, side.upper(), qty, exec_price, slippage_bps))
+        # timezone-aware, UTC timestamp (utcnow deprecation fix)
+        self.fills.append(
+            Fill(datetime.now(timezone.utc), symbol, side_u, qty, exec_price, slippage_bps)
+        )
         return True
 
     def portfolio_value(self, last_prices: Dict[str, float]) -> float:

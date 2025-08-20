@@ -1,23 +1,13 @@
-
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
-import pandas as pd
-from .base_event import BaseEvent
+from pydantic import Field
+from typing import Optional
+from .base_event import BaseEvent, EventTopic
 
-@dataclass(frozen=True)
-class DataFetchRequested(BaseEvent):
-    symbols: List[str] = field(default_factory=list)
-    timeframe: str = "1d"
-    lookback_days: int = 365
-
-@dataclass(frozen=True)
-class DataReadyEvent(BaseEvent):
-    symbol: str = ""
-    data: pd.DataFrame = field(default_factory=pd.DataFrame)
-
-@dataclass(frozen=True)
-class DataFetchFailed(BaseEvent):
-    symbol: str = ""
-    error: str = ""
-    context: Dict[str, Any] = field(default_factory=dict)
+class SignalEvent(BaseEvent):
+    topic: EventTopic = Field(default=EventTopic.SIGNAL_GENERATED)
+    strategy_id: str
+    symbol: str
+    direction: int     # 1 buy, -1 sell
+    strength: float    # 0..1
+    confidence: float  # 0..1
+    target_size: Optional[float] = None

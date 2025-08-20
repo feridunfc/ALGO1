@@ -1,14 +1,20 @@
+from __future__ import annotations
 
-from .base_event import BaseEvent
-from .data_events import DataFetchRequested, DataReadyEvent, DataFetchFailed
-from .risk_events import RiskViolationDetected, CircuitBreakerTriggered
-from .backtest_events import BacktestStarted, BacktestCompleted
-from .ui_events import ModelSelected, UserAction
+from .base_event import BaseEvent, EventTopic
+from .backtest_events import (
+    BarClosedEvent,
+    OrderSubmitEvent,
+    OrderFilledEvent,
+    PortfolioEvent,
+)
+from .data_events import SignalEvent
 
 __all__ = [
     "BaseEvent",
-    "DataFetchRequested", "DataReadyEvent", "DataFetchFailed",
-    "RiskViolationDetected", "CircuitBreakerTriggered",
-    "BacktestStarted", "BacktestCompleted",
-    "ModelSelected", "UserAction",
+    "EventTopic",
+    "BarClosedEvent",
+    "OrderSubmitEvent",
+    "OrderFilledEvent",
+    "PortfolioEvent",
+    "SignalEvent",
 ]

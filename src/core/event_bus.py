@@ -1,365 +1,181 @@
-
 from __future__ import annotations
 import asyncio
-import inspect
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, List, Any, Optional, Union
 import logging
-import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional, Tuple, Type, Union
-from collections import defaultdict
-from weakref import WeakMethod, ReferenceType
 
-logger = logging.getLogger("EventBus")
+logger = logging.getLogger("core.event_bus")
 
-try:
-    from pydantic import BaseModel, ValidationError  # type: ignore
-    _HAS_PYDANTIC = True
-except Exception:  # pragma: no cover
-    _HAS_PYDANTIC = False
-    class BaseModel:  # type: ignore
-        @classmethod
-        def validate(cls, v): return v
-    class ValidationError(Exception): pass
 
-try:
-    from opentelemetry import trace  # type: ignore
-    _tracer = trace.get_tracer("eventbus")
-except Exception:  # pragma: no cover
-    _tracer = None
+class EventBusStats:
+    def __init__(self):
+        self.events_published = 0
+        self.events_processed = 0
+        self.events_dropped = 0
+        self.max_queue_size = 0
+        self.subscribers: Dict[str, int] = {}
 
-@dataclass(frozen=True)
-class BaseEvent:
-    source: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    correlation_id: Optional[str] = None
-    parent_id: Optional[str] = None
-
-    @property
-    def event_type(self) -> str:
-        return type(self).__name__
-
-    @property
-    def version(self) -> str:
-        return "1.0"
-
-    def to_dict(self) -> Dict[str, Any]:
+    def snapshot(self):
         return {
-            "event_type": self.event_type,
-            "version": self.version,
-            "source": self.source,
-            "timestamp": self.timestamp.isoformat(),
-            "event_id": self.event_id,
-            "correlation_id": self.correlation_id,
-            "parent_id": self.parent_id,
-            "metadata": self.metadata,
+            "events_published": self.events_published,
+            "events_processed": self.events_processed,
+            "events_dropped": self.events_dropped,
+            "max_queue_size": self.max_queue_size,
+            "subscribers": dict(self.subscribers),
         }
 
-class _EventSchema(BaseModel):  # type: ignore
-    event_type: str
-    source: str
-    timestamp: datetime
-    event_id: str
 
-HandlerT = Union[Callable[[BaseEvent], Any], Callable[[BaseEvent], Awaitable[Any]]]
+class EnhancedEventBus:
+    """
+    Enhanced asyncio-based event bus with sync/async handlers and basic metrics.
+    """
+    def __init__(self, max_workers: int = 8, max_queue_size: int = 10000, worker_loop_sleep: float = 0.001):
+        self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}
+        self._async_subscribers: Dict[str, List[Callable[[Any], Any]]] = {}
+        self._lock = threading.RLock()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self._worker_task: Optional[asyncio.Task] = None
+        self._running = False
+        self._worker_loop_sleep = worker_loop_sleep
+        self._stats = EventBusStats()
+        self.on_event_processed: Optional[Callable[[Any], None]] = None
 
-from dataclasses import dataclass
+    async def start(self):
+        if self._running:
+            return
+        self._running = True
+        loop = asyncio.get_running_loop()
+        self._worker_task = loop.create_task(self._event_loop())
+        logger.info("EnhancedEventBus started")
 
-@dataclass
-class _Subscription:
-    handler: HandlerT
-    priority: int = 0
-    is_async: Optional[bool] = None
-    once: bool = False
-    filter_fn: Optional[Callable[[BaseEvent], bool]] = None
-    weakref: bool = False
-
-    def resolve(self) -> HandlerT:
-        if self.weakref and isinstance(self.handler, ReferenceType):
-            ref = self.handler()
-            if ref is None:
-                raise ReferenceError("Handler lost (weakref)")
-            return ref  # type: ignore
-        return self.handler  # type: ignore
-
-PreMW = Callable[[BaseEvent], Optional[BaseEvent]]
-PostMW = Callable[[BaseEvent, List[Tuple[str, Any]]], None]
-
-class DropPolicy:
-    BLOCK = "block"
-    DROP_OLDEST = "drop_oldest"
-    DROP_NEW = "drop_new"
-
-class EventBus:
-    def __init__(
-        self,
-        *,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        max_queue: int = 10000,
-        workers: int = 4,
-        drop_policy: str = DropPolicy.DROP_NEW,
-        sticky_events: bool = True,
-        audit_logs: bool = True,
-        dlq: Optional[asyncio.Queue] = None,
-        validate_schema: bool = False,
-        max_retries: int = 0,
-        retry_backoff: float = 0.2,
-    ):
-        self.loop = loop or asyncio.get_event_loop()
-        self.queue: asyncio.Queue[BaseEvent] = asyncio.Queue(maxsize=max_queue)
-        self.drop_policy = drop_policy
-        self.sticky_enabled = sticky_events
-        self._sticky: Dict[Type[BaseEvent], BaseEvent] = {}
-
-        self._subs: DefaultDict[Type[BaseEvent], List[_Subscription]] = defaultdict(list)
-        self._subs_any: List[_Subscription] = []
-
-        self._workers: List[asyncio.Task] = []
-        self._stopped = asyncio.Event()
-        self._pre: List[PreMW] = []
-        self._post: List[PostMW] = []
-
-        self.audit_logs = audit_logs
-        self.dlq = dlq
-        self.validate_schema = validate_schema and _HAS_PYDANTIC
-        self.max_retries = max_retries
-        self.retry_backoff = retry_backoff
-
-        self.metrics = {"published":0,"processed":0,"dropped":0,"errors":0,"latency_ms_avg":0.0}
-
-        for i in range(workers):
-            self._workers.append(self.loop.create_task(self._worker(i)))
-
-    def add_pre_middleware(self, fn: PreMW): self._pre.append(fn)
-    def add_post_middleware(self, fn: PostMW): self._post.append(fn)
-
-    def subscribe(
-        self,
-        event_cls: Type[BaseEvent],
-        handler: HandlerT,
-        *,
-        priority: int = 0,
-        is_async: Optional[bool] = None,
-        filter_fn: Optional[Callable[[BaseEvent], bool]] = None,
-        once: bool = False,
-        weakref: bool = False,
-        replay_sticky: bool = True,
-    ) -> None:
-        if is_async is None:
-            is_async = inspect.iscoroutinefunction(handler)
-        sub = _Subscription(
-            handler=handler if not weakref else WeakMethod(handler) if inspect.ismethod(handler) else handler,
-            priority=priority, is_async=is_async, once=once, filter_fn=filter_fn, weakref=weakref
-        )
-        if event_cls is BaseEvent:
-            self._subs_any.append(sub)
-            self._subs_any.sort(key=lambda s: -s.priority)
-        else:
-            self._subs[event_cls].append(sub)
-            self._subs[event_cls].sort(key=lambda s: -s.priority)
-
-        if self.sticky_enabled and replay_sticky:
-            for etype, ev in self._sticky.items():
-                if issubclass(etype, event_cls) or (event_cls is etype):
-                    self.loop.create_task(self._dispatch_one(ev, sub))
-
-    def unsubscribe(self, event_cls: Type[BaseEvent], handler: HandlerT) -> None:
-        def _rm(lst: List[_Subscription]):
-            for s in list(lst):
-                try:
-                    res = s.resolve()
-                except ReferenceError:
-                    lst.remove(s); continue
-                if res == handler:
-                    lst.remove(s)
-        if event_cls is BaseEvent: _rm(self._subs_any)
-        else: _rm(self._subs[event_cls])
-
-    def publish(self, event: BaseEvent) -> None:
-        ev = self._preprocess(event)
-        if ev is None: return
-        try:
-            self.queue.put_nowait(ev)
-            self.metrics["published"] += 1
-        except asyncio.QueueFull:
-            self._handle_full_queue(ev)
-
-    async def post(self, event: BaseEvent) -> None:
-        ev = self._preprocess(event)
-        if ev is None: return
-        try:
-            await self.queue.put(ev)
-            self.metrics["published"] += 1
-        except asyncio.QueueFull:
-            self._handle_full_queue(ev)
-
-    def publish_sync(self, event: BaseEvent) -> None:
-        ev = self._preprocess(event)
-        if ev is None: return
-        self.loop.run_until_complete(self._dispatch(ev))
-
-    def _preprocess(self, event: BaseEvent) -> Optional[BaseEvent]:
-        ev = event
-        if self.validate_schema:
+    async def stop(self, timeout: float = 2.0):
+        if not self._running:
+            return
+        self._running = False
+        if self._worker_task:
             try:
-                _EventSchema.validate(ev.to_dict())
-            except Exception as e:
-                logger.error("Invalid event schema: %s", e)
-                return None
-        for mw in self._pre:
-            ev = mw(ev)
-            if ev is None:
-                self.metrics["dropped"] += 1
-                return None
-        if self.sticky_enabled:
-            self._sticky[type(ev)] = ev
-        return ev
+                await asyncio.wait_for(self._worker_task, timeout=timeout)
+            except asyncio.TimeoutError:
+                self._worker_task.cancel()
+                logger.warning("EventBus worker cancel due to timeout")
+            finally:
+                self._worker_task = None
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
+        logger.info("EnhancedEventBus stopped")
 
-    def _handle_full_queue(self, ev: BaseEvent):
-        self.metrics["dropped"] += 1
-        if self.drop_policy == "block":
-            self.loop.run_until_complete(self.queue.put(ev))
-        elif self.drop_policy == "drop_oldest":
+    async def publish(self, topic: Union[str, Any], event: Any) -> bool:
+        key = self._topic_to_key(topic)
+        if not hasattr(event, "topic"):
             try:
-                self.queue.get_nowait()
-                self.loop.run_until_complete(self.queue.put(ev))
+                setattr(event, "topic", key)
             except Exception:
                 pass
-        else:
-            if self.audit_logs: logger.warning("Event dropped (queue full): %s", ev.event_type)
+        try:
+            await self._queue.put((key, event))
+            self._stats.events_published += 1
+            qsize = self._queue.qsize()
+            if qsize > self._stats.max_queue_size:
+                self._stats.max_queue_size = qsize
+            return True
+        except asyncio.QueueFull:
+            self._stats.events_dropped += 1
+            logger.warning("EventBus queue full, event dropped: %s", key)
+            return False
 
-    async def request(self, event: BaseEvent, response_cls: Type[BaseEvent], timeout: float = 3.0) -> BaseEvent:
-        fut: asyncio.Future = self.loop.create_future()
-        corr = event.correlation_id or event.event_id
-        def _resp_handler(resp: BaseEvent):
-            if resp.correlation_id == corr and not fut.done():
-                fut.set_result(resp)
-        self.subscribe(response_cls, _resp_handler, once=True, is_async=False, replay_sticky=False)
-        await self.post(event)
-        return await asyncio.wait_for(fut, timeout=timeout)
-
-    async def adjust_workers(self, new_count: int):
-        while len(self._workers) < new_count:
-            self._workers.append(self.loop.create_task(self._worker(len(self._workers))))
-        while len(self._workers) > new_count:
-            t = self._workers.pop()
-            t.cancel()
-            try: await t
-            except Exception: pass
-
-    async def _worker(self, wid: int):
-        while not self._stopped.is_set():
-            ev = await self.queue.get()
-            start = time.perf_counter()
+    async def _event_loop(self):
+        while self._running:
             try:
-                await self._dispatch_with_retry(ev)
-            except Exception as e:
-                self.metrics["errors"] += 1
-                logger.exception("Worker-%d dispatch failed: %s", wid, e)
-                if self.dlq is not None:
-                    try: self.dlq.put_nowait((ev, str(e)))
-                    except Exception: pass
-            finally:
-                self.queue.task_done()
-                elapsed = (time.perf_counter() - start) * 1000.0
-                a = 0.05
-                self.metrics["latency_ms_avg"] = a * elapsed + (1 - a) * self.metrics["latency_ms_avg"]
+                try:
+                    key, event = await asyncio.wait_for(self._queue.get(), timeout=self._worker_loop_sleep)
+                except asyncio.TimeoutError:
+                    await asyncio.sleep(self._worker_loop_sleep)
+                    continue
 
-    async def _dispatch_with_retry(self, ev: BaseEvent):
-        retries = 0
-        backoff = self.retry_backoff
-        while True:
-            try:
-                await self._dispatch(ev); return
+                with self._lock:
+                    sync_handlers = list(self._subscribers.get(key, []))
+                    async_handlers = list(self._async_subscribers.get(key, []))
+
+                for cb in sync_handlers:
+                    try:
+                        self._executor.submit(self._safe_execute, cb, event)
+                    except Exception:
+                        logger.exception("Failed to submit sync handler to executor")
+
+                for async_cb in async_handlers:
+                    try:
+                        await self._safe_async_execute(async_cb, event)
+                    except Exception:
+                        logger.exception("Async handler failure for topic %s", key)
+
+                self._stats.events_processed += 1
+                if self.on_event_processed:
+                    try:
+                        self.on_event_processed(event)
+                    except Exception:
+                        logger.exception("on_event_processed hook failed")
+
+                try:
+                    self._queue.task_done()
+                except Exception:
+                    pass
+
+            except asyncio.CancelledError:
+                break
             except Exception:
-                retries += 1
-                if retries > self.max_retries: raise
-                await asyncio.sleep(backoff); backoff *= 2
+                logger.exception("EventBus main loop exception")
+                await asyncio.sleep(0.01)
 
-    async def _dispatch(self, ev: BaseEvent):
-        subs: List[_Subscription] = []
-        for cls, lst in self._subs.items():
-            if isinstance(ev, cls): subs.extend(lst)
-        subs.extend(self._subs_any)
-
-        span_ctx = None
-        if _tracer is not None:  # pragma: no cover
-            span_ctx = _tracer.start_span(ev.event_type)
-
-        results: List[Tuple[str, Any]] = []
-        remove: List[Tuple[Type[BaseEvent], _Subscription]] = []
-
-        for sub in subs:
-            try:
-                h = sub.resolve()
-            except ReferenceError:
-                for k, lst in self._subs.items():
-                    if sub in lst: lst.remove(sub)
-                if sub in self._subs_any: self._subs_any.remove(sub)
-                continue
-
-            if sub.filter_fn and not sub.filter_fn(ev):
-                continue
-
-            try:
-                if sub.is_async: res = await h(ev)  # type: ignore
-                else: res = h(ev)  # type: ignore
-                results.append((getattr(h, "__name__", str(h)), res))
-            except Exception as e:
-                self.metrics["errors"] += 1
-                logger.exception("Handler error (%s): %s", getattr(h, "__name__", h), e)
-                results.append((getattr(h, "__name__", str(h)), e))
-                if self.dlq is not None:
-                    try: self.dlq.put_nowait((ev, f"handler:{getattr(h,'__name__',h)}:{e}"))
-                    except Exception: pass
-
-            if sub.once: remove.append((type(ev), sub))
-
-        for mw in self._post:
-            try: mw(ev, results)
-            except Exception as e:
-                logger.exception("post-middleware error: %s", e)
-
-        for et, sub in remove:
-            if sub in self._subs_any: self._subs_any.remove(sub)
+    def subscribe(self, topic: Union[str, Any], callback: Callable[[Any], Any], is_async: bool = False):
+        key = self._topic_to_key(topic)
+        with self._lock:
+            if is_async:
+                self._async_subscribers.setdefault(key, []).append(callback)
             else:
-                try: self._subs[et].remove(sub)
-                except ValueError: pass
+                self._subscribers.setdefault(key, []).append(callback)
+            self._stats.subscribers[key] = self._stats.subscribers.get(key, 0) + 1
+        logger.debug("Subscribed handler %s to topic %s (async=%s)", getattr(callback, "__qualname__", repr(callback)), key, is_async)
 
-        if span_ctx is not None:  # pragma: no cover
-            try: span_ctx.end()
-            except Exception: pass
+    def unsubscribe(self, topic: Union[str, Any], callback: Callable[[Any], Any], is_async: bool = False):
+        key = self._topic_to_key(topic)
+        with self._lock:
+            if is_async:
+                lst = self._async_subscribers.get(key, [])
+            else:
+                lst = self._subscribers.get(key, [])
+            try:
+                lst.remove(callback)
+                self._stats.subscribers[key] = max(0, self._stats.subscribers.get(key, 1) - 1)
+            except ValueError:
+                pass
 
-        self.metrics["processed"] += 1
+    def get_stats(self) -> Dict[str, Any]:
+        s = self._stats.snapshot()
+        s["queue_size"] = self._queue.qsize()
+        return s
 
-    async def _dispatch_one(self, ev: BaseEvent, sub: _Subscription):
-        try: h = sub.resolve()
-        except ReferenceError: return
-        if sub.filter_fn and not sub.filter_fn(ev): return
-        if sub.is_async: await h(ev)  # type: ignore
-        else: h(ev)  # type: ignore
+    def _safe_execute(self, callback: Callable, event: Any):
+        try:
+            callback(event)
+        except Exception:
+            logger.exception("Sync handler raised exception")
 
-    async def shutdown(self, timeout: float = 5.0):
-        self._stopped.set()
-        try: await asyncio.wait_for(self.queue.join(), timeout=timeout)
-        except asyncio.TimeoutError: pass
-        for t in self._workers:
-            t.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
+    async def _safe_async_execute(self, callback: Callable, event: Any):
+        try:
+            await callback(event)
+        except Exception:
+            logger.exception("Async handler raised exception")
 
-event_bus = EventBus()
-
-def tracing_middleware_pre(ev: BaseEvent) -> Optional[BaseEvent]:
-    logger.debug("[EVT PUBLISH] %s | src=%s | id=%s", ev.event_type, ev.source, ev.event_id)
-    return ev
-
-def audit_middleware_post(ev: BaseEvent, results: List[Tuple[str, Any]]) -> None:
-    errs = [r for r in results if isinstance(r[1], Exception)]
-    if errs:
-        logger.warning("[EVT ERR] %s -> %d error(s)", ev.event_type, len(errs))
-
-event_bus.add_pre_middleware(tracing_middleware_pre)
-event_bus.add_post_middleware(audit_middleware_post)
+    @staticmethod
+    def _topic_to_key(topic: Union[str, Any]) -> str:
+        if topic is None:
+            return "NONE"
+        if isinstance(topic, str):
+            return topic
+        if hasattr(topic, "value"):
+            return str(topic.value)
+        return str(topic)
