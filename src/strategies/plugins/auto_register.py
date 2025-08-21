@@ -1,64 +1,53 @@
+# src/strategies/plugins/auto_register.py
 from __future__ import annotations
-import importlib, pkgutil, inspect
-from typing import Dict, Type
+import importlib
+import inspect
+from typing import Optional, Union
+from src.strategies.registry import register_strategy
 
-def bootstrap(verbose: bool = False) -> Dict[str, Type]:
+def _import_from_spec(spec: str):
+    modpath, _, clsname = spec.partition(":")
+    if not modpath or not clsname:
+        raise ValueError(f"Invalid spec '{spec}', expected 'pkg.mod:ClassName'")
+    mod = importlib.import_module(modpath)
+    return getattr(mod, clsname)
+
+def try_register(a: Union[str, type], b: Optional[Union[str, type]] = None) -> bool:
     """
-    Discover & register strategies into STRATEGY_REGISTRY.
-    - Walks src.strategies.* packages
-    - Adds any class subclassing `Strategy` to the registry if it exposes a `name` or __name__
+    Esnek kayıt:
+      - try_register("key", "pkg.mod:Class")          # klasik
+      - try_register("key", SomeStrategyClass)        # sınıf doğrudan
+      - try_register(SomeStrategyClass, "key")        # argümanlar ters
+      - try_register("pkg.mod:Class")                 # key=ClassName.lower() türetir
+      - try_register(SomeStrategyClass)               # key=ClassName.lower()
     """
     try:
-        from src.strategies.base import Strategy  # type: ignore
-    except Exception as e:
-        if verbose:
-            print("[auto_register] base import failed:", e)
-        return {}
+        # 2 argümanlı kullanım
+        if b is not None:
+            if isinstance(a, str) and isinstance(b, str):
+                cls = _import_from_spec(b); key = a
+            elif isinstance(a, str) and inspect.isclass(b):
+                cls = b; key = a
+            elif inspect.isclass(a) and isinstance(b, str):
+                cls = a; key = b
+            else:
+                return False
+        # 1 argümanlı kullanım
+        else:
+            if isinstance(a, str):
+                cls = _import_from_spec(a)
+                key = cls.__name__.lower()
+            elif inspect.isclass(a):
+                cls = a
+                key = cls.__name__.lower()
+            else:
+                return False
 
-    try:
-        from src.strategies.registry import STRATEGY_REGISTRY  # type: ignore
+        register_strategy(key)(cls)
+        return True
     except Exception:
-        # Fallback local registry if project doesn't expose one
-        STRATEGY_REGISTRY = {}
+        return False
 
-    registered_before = set(STRATEGY_REGISTRY.keys())
-
-    # Drill into package
-    try:
-        strategies_pkg = importlib.import_module("src.strategies")
-    except Exception as e:
-        if verbose:
-            print("[auto_register] cannot import src.strategies:", e)
-        return dict(STRATEGY_REGISTRY)
-
-    for modinfo in pkgutil.walk_packages(
-        strategies_pkg.__path__, strategies_pkg.__name__ + "."
-    ):
-        modname = modinfo.name
-        # skip obvious non-strategy modules
-        if any(skip in modname for skip in (".plugins", ".__", ".registry", ".base")):
-            continue
-        try:
-            mod = importlib.import_module(modname)
-        except Exception:
-            # keep going; some optional deps may be missing
-            continue
-
-        for _, obj in inspect.getmembers(mod, inspect.isclass):
-            if not issubclass(obj, Strategy) or obj is Strategy:
-                continue
-            # pick a registry key
-            key = getattr(obj, "name", None) or obj.__name__
-            key = str(key).strip()
-            if not key:
-                continue
-            if key in STRATEGY_REGISTRY:
-                continue
-            STRATEGY_REGISTRY[key] = obj
-            if verbose:
-                print(f"[auto_register] registered: {key} -> {obj}")
-
-    if verbose:
-        newly = set(STRATEGY_REGISTRY.keys()) - registered_before
-        print(f"[auto_register] total={len(STRATEGY_REGISTRY)} (+{len(newly)})")
-    return dict(STRATEGY_REGISTRY)
+def bootstrap() -> int:
+    """Opsiyonel auto-discovery kancası (şimdilik no-op)."""
+    return 0

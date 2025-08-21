@@ -1,22 +1,53 @@
 # src/strategies/registry.py
 from __future__ import annotations
-from typing import Callable, Dict, Any, Optional, List, Tuple
+
+# --- StrategyParameters shim (ilk satırlara ekle) -----------------------------
+# Önce varsa base.py'den al
+try:
+    from .base import StrategyParameters  # tek kaynak
+except Exception:
+    # Yoksa pydantic ile minimal şema tanımı yap
+    try:
+        from pydantic import BaseModel
+    except Exception:
+        # pydantic yoksa çok basit bir fallback (tip amaçlı)
+        class BaseModel:  # type: ignore
+            pass
+
+    class StrategyParameters(BaseModel):  # type: ignore
+        """Strateji parametreleri için ortak şema (UI/registry tip ipucu)."""
+        pass
+# -----------------------------------------------------------------------------
+
+
+
 import importlib
+import inspect
 import logging
+import pkgutil
+import traceback
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+
+# Base ve Param şeması (projenizde bu dosya var)
+from src.strategies.base_strategy import BaseStrategy, StrategyParameters
 
 logger = logging.getLogger(__name__)
 
-# --- Ana registry ve yardımcılar ------------------------------------------------
+# -----------------------------------------------------------------------------
+# Kayıt defteri (manuel veya dekoratör ile eklemek için)
+# -----------------------------------------------------------------------------
 STRATEGY_REGISTRY: Dict[str, Callable[..., Any]] = {}
 
 def register_strategy(name: str):
     """
-    Strateji sınıf/factory’lerini kayıt etmek için dekoratör.
+    Sınıf/factory kayıt dekoratörü.
     Modül import edilince otomatik tetiklenir.
     """
     def deco(cls_or_fn):
         STRATEGY_REGISTRY[name] = cls_or_fn
-        logger.debug("strategy registered: %s -> %s", name, getattr(cls_or_fn, "__name__", str(cls_or_fn)))
+        logger.debug("strategy registered: %s -> %s",
+                     name, getattr(cls_or_fn, "__name__", str(cls_or_fn)))
         return cls_or_fn
     return deco
 
@@ -29,7 +60,9 @@ def create(name: str, *args, **kwargs):
         raise KeyError(f"Strategy '{name}' not found. Available: {list_strategies()}")
     return factory(*args, **kwargs)
 
-# --- Otomatik keşif (varsa) ----------------------------------------------------
+# -----------------------------------------------------------------------------
+# Otomatik keşif (plugins/auto_register varsa)
+# -----------------------------------------------------------------------------
 def _bootstrap_autodiscovery() -> int:
     """
     src.strategies.plugins.auto_register.bootstrap() varsa çağırır.
@@ -42,43 +75,47 @@ def _bootstrap_autodiscovery() -> int:
         return 0
     before = len(STRATEGY_REGISTRY)
     gained = _auto()
-    logger.info("auto_discovery registered +%d strategies (total=%d)", gained, len(STRATEGY_REGISTRY))
+    logger.info("auto_discovery registered +%d strategies (total=%d)",
+                gained, len(STRATEGY_REGISTRY))
     return len(STRATEGY_REGISTRY) - before
 
-# --- Statik modül listesi (ağır import’ı geciktirmek için “lazy”) --------------
+# -----------------------------------------------------------------------------
+# Statik bağlar (lazy import)
 # Biçim: ("registry_key", "import.path:ClassName")
+# -----------------------------------------------------------------------------
 _STATIC_BINDINGS: List[Tuple[str, str]] = [
     # --- AI ---
-    ("ai_tree_boost",           "src.strategies.ai.tree_boost:TreeBoostStrategy"),
-    ("ai_random_forest",        "src.strategies.ai.random_forest:RandomForestStrategy"),
-    ("ai_extra_trees",          "src.strategies.ai.extra_trees:ExtraTreesStrategy"),
-    ("ai_logistic",             "src.strategies.ai.logistic:LogisticStrategy"),
-    ("ai_svm",                  "src.strategies.ai.svm:SVMStrategy"),
-    ("ai_knn",                  "src.strategies.ai.knn:KNNStrategy"),
-    ("ai_xgboost",              "src.strategies.ai.xgboost_strict:XGBoostStrictStrategy"),
-    ("ai_lightgbm",             "src.strategies.ai.lightgbm:LightGBMStrategy"),
-    ("ai_catboost",             "src.strategies.ai.catboost:CatBoostStrategy"),
-    ("ai_naive_bayes",          "src.strategies.ai.naive_bayes:NaiveBayesStrategy"),
-    ("ai_lstm",                 "src.strategies.ai.lstm:LSTMStrategy"),
+    ("ai_tree_boost",      "src.strategies.ai.tree_boost:TreeBoostStrategy"),
+    ("ai_random_forest",   "src.strategies.ai.random_forest:RandomForestStrategy"),
+    ("ai_extra_trees",     "src.strategies.ai.extra_trees:ExtraTreesStrategy"),
+    ("ai_logistic",        "src.strategies.ai.logistic:LogisticStrategy"),
+    ("ai_svm",             "src.strategies.ai.svm:SVMStrategy"),
+    ("ai_knn",             "src.strategies.ai.knn:KNNStrategy"),
+    ("ai_xgboost",         "src.strategies.ai.xgboost_strict:XGBoostStrictStrategy"),
+    ("ai_lightgbm",        "src.strategies.ai.lightgbm:LightGBMStrategy"),
+    ("ai_catboost",        "src.strategies.ai.catboost:CatBoostStrategy"),
+    ("ai_naive_bayes",     "src.strategies.ai.naive_bayes:NaiveBayesStrategy"),
+    ("ai_lstm",            "src.strategies.ai.lstm:LSTMStrategy"),
+    ("ai_online_sgd",      "src.strategies.ai.online_sgd:OnlineSGDStrategy"),
 
     # --- Rule-based ---
-    ("rb_ma_crossover",         "src.strategies.rule_based.ma_crossover:MACrossover"),
-    ("rb_breakout",             "src.strategies.rule_based.breakout:Breakout"),
-    ("rb_rsi_threshold",        "src.strategies.rule_based.rsi_threshold:RSIThreshold"),
-    ("rb_macd",                 "src.strategies.rule_based.macd_signal:MACDSignal"),
-    ("rb_bollinger_reversion",  "src.strategies.rule_based.bollinger_reversion:BollingerReversion"),
-    ("rb_donchian_breakout",    "src.strategies.rule_based.donchian_breakout:DonchianBreakout"),
-    ("rb_stochastic",           "src.strategies.rule_based.stochastic_osc:StochasticOsc"),
-    ("rb_adx_trend",            "src.strategies.rule_based.adx_trend:ADXTrend"),
-    ("rb_vol_breakout_atr",     "src.strategies.rule_based.vol_breakout_atr:VolatilityBreakoutATR"),
-    ("rb_ichimoku",             "src.strategies.rule_based.ichimoku:IchimokuTrend"),
+    ("rb_ma_crossover",        "src.strategies.rule_based.ma_crossover:MACrossover"),
+    ("rb_breakout",            "src.strategies.rule_based.breakout:Breakout"),
+    ("rb_rsi_threshold",       "src.strategies.rule_based.rsi_threshold:RSIThreshold"),
+    ("rb_macd",                "src.strategies.rule_based.macd_signal:MACDSignal"),
+    ("rb_bollinger_reversion", "src.strategies.rule_based.bollinger_reversion:BollingerReversion"),
+    ("rb_donchian_breakout",   "src.strategies.rule_based.donchian_breakout:DonchianBreakout"),
+    ("rb_stochastic",          "src.strategies.rule_based.stochastic_osc:StochasticOsc"),
+    ("rb_adx_trend",           "src.strategies.rule_based.adx_trend:ADXTrend"),
+    ("rb_vol_breakout_atr",    "src.strategies.rule_based.vol_breakout_atr:VolatilityBreakoutATR"),
+    ("rb_ichimoku",            "src.strategies.rule_based.ichimoku:IchimokuTrend"),
 
     # --- Hybrid ---
-    ("hy_ensemble_voter",       "src.strategies.hybrid.ensemble_voter:EnsembleVoter"),
-    ("hy_meta_labeler",         "src.strategies.hybrid.meta_labeler:MetaLabeler"),
-    ("hy_regime_switcher",      "src.strategies.hybrid.regime_switcher:RegimeSwitcher"),
-    ("hy_weighted_ensemble",    "src.strategies.hybrid.weighted_ensemble:WeightedEnsemble"),
-    ("hy_rule_filter_ai",       "src.strategies.hybrid.rule_filter_ai:RuleFilterAI"),
+    ("hy_ensemble_voter",     "src.strategies.hybrid.ensemble_voter:EnsembleVoter"),
+    ("hy_meta_labeler",       "src.strategies.hybrid.meta_labeler:MetaLabeler"),
+    ("hy_regime_switcher",    "src.strategies.hybrid.regime_switcher:RegimeSwitcher"),
+    ("hy_weighted_ensemble",  "src.strategies.hybrid.weighted_ensemble:WeightedEnsemble"),
+    ("hy_rule_filter_ai",     "src.strategies.hybrid.rule_filter_ai:RuleFilterAI"),
 ]
 
 def _import_from_path(spec: str) -> Optional[type]:
@@ -92,7 +129,7 @@ def _import_from_path(spec: str) -> Optional[type]:
         module = importlib.import_module(modpath)
         return getattr(module, clsname, None)
     except Exception as e:
-        logger.warning("could not import %s (%s)", spec, e)
+        logger.info("static bind skipped: %s (%s)", spec, e)
         return None
 
 def _bootstrap_static_bindings() -> int:
@@ -107,15 +144,131 @@ def _bootstrap_static_bindings() -> int:
         cls = _import_from_path(spec)
         if cls is None:
             continue
-        # Eğer modül içinde @register_strategy kullanılmışsa, import ile zaten eklenmiş olabilir.
-        # Yine de garanti için elle kaydediyoruz (idempotent).
         STRATEGY_REGISTRY.setdefault(key, cls)
         added += 1
     if added:
-        logger.info("static bindings registered +%d strategies (total=%d)", added, len(STRATEGY_REGISTRY))
+        logger.info("static bindings registered +%d (total=%d)", added, len(STRATEGY_REGISTRY))
     return added
 
-# --- Dışarıya tek giriş: bootstrap --------------------------------------------
+# -----------------------------------------------------------------------------
+# StrategySpec & discovery
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class StrategySpec:
+    qualified_name: str
+    display_name: str
+    family: str
+    module: str
+    cls: Type
+    param_schema: Optional[Type[StrategyParameters]]
+
+def _looks_like_strategy_class(obj) -> bool:
+    """
+    Hem rule-based hem AI sınıflarını kapsayacak gevşek dedektör.
+    """
+    if not inspect.isclass(obj):
+        return False
+    if inspect.isabstract(obj):
+        return False
+    # 1) is_strategy bayrağı
+    if getattr(obj, "is_strategy", False):
+        return True
+    # 2) Rule-based: generate_signals
+    if callable(getattr(obj, "generate_signals", None)):
+        return True
+    # 3) AI: fit/train + predict/predict_proba
+    has_train = callable(getattr(obj, "fit", None)) or callable(getattr(obj, "train", None))
+    has_pred = callable(getattr(obj, "predict", None)) or callable(getattr(obj, "predict_proba", None))
+    return has_train and has_pred
+
+def discover_strategies() -> Dict[str, StrategySpec]:
+    """
+    Tüm paketleri tarar; hatalı modülleri atlayarak StrategySpec sözlüğü döndürür.
+    """
+    import src.strategies as root
+
+    results: Dict[str, StrategySpec] = {}
+    errors: Dict[str, str] = {}
+    skip_contains = (
+        ".features", ".strategy_factory", ".registry", ".adapters", ".base", ".hybrid_v1",
+        ".ai.logreg_strategy", ".ai.rf_strategy"  # legacy dosyalar
+    )
+
+    candidates: List[str] = []
+
+    # 1) Ana paket üzerinden yürü (pkgutil)
+    if hasattr(root, "__path__"):
+        for modinfo in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
+            name = modinfo.name
+            if any(s in name for s in skip_contains):
+                continue
+            candidates.append(name)
+
+    # 2) Walk paket bulamadıysa, alt paket fallback
+    if not candidates:
+        for pkg in ("src.strategies.rule_based", "src.strategies.ai", "src.strategies.hybrid"):
+            try:
+                mod = importlib.import_module(pkg)
+                if hasattr(mod, "__path__"):
+                    for mi in pkgutil.walk_packages(mod.__path__, pkg + "."):
+                        name = mi.name
+                        if any(s in name for s in skip_contains):
+                            continue
+                        candidates.append(name)
+            except Exception as e:
+                errors[pkg] = f"{type(e).__name__}: {e}"
+
+    # 3) Aday modülleri yükle ve sınıfları topla
+    for name in candidates:
+        try:
+            m = importlib.import_module(name)
+            for _, obj in inspect.getmembers(m, _looks_like_strategy_class):
+                qn = f"{obj.__module__}.{obj.__name__}"
+                spec = StrategySpec(
+                    qualified_name=qn,
+                    display_name=getattr(obj, "name", getattr(obj, "display_name", obj.__name__)),
+                    family=getattr(obj, "family", "conventional"),
+                    module=obj.__module__,
+                    cls=obj,
+                    param_schema=getattr(obj, "ParamSchema", None),
+                )
+                results[qn] = spec
+        except Exception as e:
+            errors[name] = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=1)}"
+
+    # 4) Hâlâ boşsa, hali hazırda kayıtlı sınıflardan üret (fallback)
+    if not results and STRATEGY_REGISTRY:
+        for key, obj in STRATEGY_REGISTRY.items():
+            if inspect.isclass(obj) and _looks_like_strategy_class(obj):
+                qn = f"{obj.__module__}.{obj.__name__}"
+                spec = StrategySpec(
+                    qualified_name=qn,
+                    display_name=getattr(obj, "name", getattr(obj, "display_name", obj.__name__)),
+                    family=getattr(obj, "family", "conventional"),
+                    module=obj.__module__,
+                    cls=obj,
+                    param_schema=getattr(obj, "ParamSchema", None),
+                )
+                results[qn] = spec
+        if not results:
+            logger.warning("Fallback to STRATEGY_REGISTRY yielded 0 usable classes.")
+
+    # Hataları UI'de gösterebilmek için attribute'a iliştiriyoruz.
+    discover_strategies.errors = errors  # type: ignore[attr-defined]
+    return results
+
+def get_strategy_class(qualified_name: str) -> Type[BaseStrategy]:
+    module_name, class_name = qualified_name.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
+
+def get_param_schema(qualified_name: str) -> Type[StrategyParameters]:
+    cls = get_strategy_class(qualified_name)
+    return getattr(cls, "ParamSchema", StrategyParameters)
+
+# -----------------------------------------------------------------------------
+# Dışarıya tek giriş: bootstrap
+# -----------------------------------------------------------------------------
 def bootstrap(mode: str = "auto", strict: bool = False) -> int:
     """
     mode:

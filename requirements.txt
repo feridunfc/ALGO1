@@ -1,4 +1,29 @@
+# Temel bilimsel yığın
+numpy>=1.26,<3
+pandas>=2.2,<3
+scipy>=1.10,<2
 
-pandas>=1.5
-numpy>=1.23
-yfinance>=0.2.40
+# Öğrenme / çevrimiçi öğrenme
+scikit-learn>=1.4,<2
+
+# Uygulama / UI
+streamlit>=1.36,<2
+plotly>=5.20,<6
+matplotlib>=3.8,<4
+
+# Olay/Model katmanı (pydantic v2 ile uyumlu)
+pydantic>=2.6,<3
+pydantic-core>=2.18,<3
+
+# Test ve raporlama
+pytest>=8.2,<9
+pytest-asyncio>=0.23,<1
+pytest-html>=4,<5
+pytest-playwright>=0.7,<0.8
+playwright>=1.46,<2
+
+# IO
+pyarrow>=15,<18
+
+# Opsiyonel ama faydalı
+tqdm>=4.66,<5
