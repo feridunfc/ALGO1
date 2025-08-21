@@ -18,6 +18,22 @@ import joblib
 import numpy as np
 import pandas as pd
 
+# --- StrategyParameters shim ---------------------------------------------------
+# Tercihen base.py'deki StrategyParameters'ı kullan; yoksa minimal bir tanım oluştur.
+try:
+    from .base import StrategyParameters  # tek kaynak
+except Exception:
+    try:
+        from pydantic import BaseModel
+    except Exception:
+        class BaseModel:  # type: ignore
+            pass
+
+    class StrategyParameters(BaseModel):  # type: ignore
+        """AI stratejileri için parametre şeması (shim)."""
+        pass
+# ------------------------------------------------------------------------------
+
 # --- Config & Logger (güvenli import + fallback) ---
 Config: Any = None
 bs_logger: Any = None

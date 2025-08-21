@@ -1,26 +1,6 @@
 # src/strategies/registry.py
 from __future__ import annotations
 
-# --- StrategyParameters shim (ilk satırlara ekle) -----------------------------
-# Önce varsa base.py'den al
-try:
-    from .base import StrategyParameters  # tek kaynak
-except Exception:
-    # Yoksa pydantic ile minimal şema tanımı yap
-    try:
-        from pydantic import BaseModel
-    except Exception:
-        # pydantic yoksa çok basit bir fallback (tip amaçlı)
-        class BaseModel:  # type: ignore
-            pass
-
-    class StrategyParameters(BaseModel):  # type: ignore
-        """Strateji parametreleri için ortak şema (UI/registry tip ipucu)."""
-        pass
-# -----------------------------------------------------------------------------
-
-
-
 import importlib
 import inspect
 import logging
@@ -29,20 +9,44 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
-# Base ve Param şeması (projenizde bu dosya var)
-from src.strategies.base_strategy import BaseStrategy, StrategyParameters
-
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Kayıt defteri (manuel veya dekoratör ile eklemek için)
+# Base sınıfları ve (varsa) parametre şemasını güvenli şekilde import et
+# -----------------------------------------------------------------------------
+try:
+    from src.strategies.base_strategy import BaseStrategy as AILearningBase  # AI tabanı
+    try:
+        # Projede yoksa sorun olmasın diye "Any" olarak ele alacağız
+        from src.strategies.base_strategy import StrategyParameters as _StrategyParameters
+    except Exception:
+        _StrategyParameters = Any  # type: ignore[misc,assignment]
+except Exception:
+    class AILearningBase:  # type: ignore[no-redef]
+        """Fallback: AI base bulunamadı (discovery yine çalışır)."""
+        pass
+    _StrategyParameters = Any  # type: ignore[misc,assignment]
+
+try:
+    from src.strategies.base import Strategy as RuleBasedBase  # Kural tabanı
+except Exception:
+    class RuleBasedBase:  # type: ignore[no-redef]
+        """Fallback: Rule-based base bulunamadı (discovery yine çalışır)."""
+        pass
+
+StrategyParameters = _StrategyParameters  # dışarıda tip adı olarak kullanalım
+
+
+# -----------------------------------------------------------------------------
+# Manuel kayıt defteri (dekoratör destekli)
 # -----------------------------------------------------------------------------
 STRATEGY_REGISTRY: Dict[str, Callable[..., Any]] = {}
 
+
 def register_strategy(name: str):
     """
-    Sınıf/factory kayıt dekoratörü.
-    Modül import edilince otomatik tetiklenir.
+    Strateji sınıflarını/Factory fonksiyonlarını registry'e eklemek için dekoratör.
+    Modül import edildiğinde tetiklenir.
     """
     def deco(cls_or_fn):
         STRATEGY_REGISTRY[name] = cls_or_fn
@@ -51,8 +55,10 @@ def register_strategy(name: str):
         return cls_or_fn
     return deco
 
+
 def list_strategies() -> List[str]:
     return sorted(STRATEGY_REGISTRY.keys())
+
 
 def create(name: str, *args, **kwargs):
     factory = STRATEGY_REGISTRY.get(name)
@@ -60,12 +66,13 @@ def create(name: str, *args, **kwargs):
         raise KeyError(f"Strategy '{name}' not found. Available: {list_strategies()}")
     return factory(*args, **kwargs)
 
+
 # -----------------------------------------------------------------------------
 # Otomatik keşif (plugins/auto_register varsa)
 # -----------------------------------------------------------------------------
 def _bootstrap_autodiscovery() -> int:
     """
-    src.strategies.plugins.auto_register.bootstrap() varsa çağırır.
+    src.strategies.plugins.auto_register.bootstrap() mevcutsa çağırır.
     Yoksa sessizce 0 döner.
     """
     try:
@@ -79,8 +86,9 @@ def _bootstrap_autodiscovery() -> int:
                 gained, len(STRATEGY_REGISTRY))
     return len(STRATEGY_REGISTRY) - before
 
+
 # -----------------------------------------------------------------------------
-# Statik bağlar (lazy import)
+# Statik bağlar (lazy import) – modüller ağırsa bile UI açılabilsin
 # Biçim: ("registry_key", "import.path:ClassName")
 # -----------------------------------------------------------------------------
 _STATIC_BINDINGS: List[Tuple[str, str]] = [
@@ -118,10 +126,9 @@ _STATIC_BINDINGS: List[Tuple[str, str]] = [
     ("hy_rule_filter_ai",     "src.strategies.hybrid.rule_filter_ai:RuleFilterAI"),
 ]
 
+
 def _import_from_path(spec: str) -> Optional[type]:
-    """
-    'pkg.mod:ClassName' -> Class obj
-    """
+    """'pkg.mod:ClassName' -> Class obj (yoksa None)."""
     modpath, _, clsname = spec.partition(":")
     if not modpath or not clsname:
         return None
@@ -132,11 +139,9 @@ def _import_from_path(spec: str) -> Optional[type]:
         logger.info("static bind skipped: %s (%s)", spec, e)
         return None
 
+
 def _bootstrap_static_bindings() -> int:
-    """
-    Modülleri import edip (dekoratör yoksa) sınıfı elle registry’ye bağlar.
-    Ağır bağımlılıklar yoksa sessizce atlar.
-    """
+    """Modülleri import edip sınıfı (gerekirse) registry’ye bağlar."""
     added = 0
     for key, spec in _STATIC_BINDINGS:
         if key in STRATEGY_REGISTRY:
@@ -150,6 +155,7 @@ def _bootstrap_static_bindings() -> int:
         logger.info("static bindings registered +%d (total=%d)", added, len(STRATEGY_REGISTRY))
     return added
 
+
 # -----------------------------------------------------------------------------
 # StrategySpec & discovery
 # -----------------------------------------------------------------------------
@@ -160,51 +166,50 @@ class StrategySpec:
     family: str
     module: str
     cls: Type
-    param_schema: Optional[Type[StrategyParameters]]
+    param_schema: Optional[Type[Any]]  # StrategyParameters varsa o, yoksa Any
 
-def _looks_like_strategy_class(obj) -> bool:
+
+def _looks_like_strategy_class(obj: Any) -> bool:
     """
-    Hem rule-based hem AI sınıflarını kapsayacak gevşek dedektör.
+    Hem rule-based hem AI sınıflarını kapsayan seçici.
+    - Somut sınıf olmalı
+    - Bizim tabanlardan türemeli veya is_strategy=True olmalı
     """
-    if not inspect.isclass(obj):
+    if not inspect.isclass(obj) or inspect.isabstract(obj):
         return False
-    if inspect.isabstract(obj):
-        return False
-    # 1) is_strategy bayrağı
+
     if getattr(obj, "is_strategy", False):
         return True
-    # 2) Rule-based: generate_signals
-    if callable(getattr(obj, "generate_signals", None)):
+
+    if issubclass(obj, (AILearningBase, RuleBasedBase)):
         return True
-    # 3) AI: fit/train + predict/predict_proba
+
+    # Yedek sezgisel: fit/train + predict/predict_proba kombinasyonu
     has_train = callable(getattr(obj, "fit", None)) or callable(getattr(obj, "train", None))
     has_pred = callable(getattr(obj, "predict", None)) or callable(getattr(obj, "predict_proba", None))
     return has_train and has_pred
 
+
 def discover_strategies() -> Dict[str, StrategySpec]:
-    """
-    Tüm paketleri tarar; hatalı modülleri atlayarak StrategySpec sözlüğü döndürür.
-    """
     import src.strategies as root
 
     results: Dict[str, StrategySpec] = {}
     errors: Dict[str, str] = {}
     skip_contains = (
         ".features", ".strategy_factory", ".registry", ".adapters", ".base", ".hybrid_v1",
-        ".ai.logreg_strategy", ".ai.rf_strategy"  # legacy dosyalar
+        ".ai.logreg_strategy", ".ai.rf_strategy"  # legacy
     )
 
     candidates: List[str] = []
-
-    # 1) Ana paket üzerinden yürü (pkgutil)
+    # 1) kök paket üzerinden adayları topla
     if hasattr(root, "__path__"):
-        for modinfo in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
-            name = modinfo.name
+        for mi in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
+            name = mi.name
             if any(s in name for s in skip_contains):
                 continue
             candidates.append(name)
 
-    # 2) Walk paket bulamadıysa, alt paket fallback
+    # 2) gerekirse alt paket fallback
     if not candidates:
         for pkg in ("src.strategies.rule_based", "src.strategies.ai", "src.strategies.hybrid"):
             try:
@@ -218,16 +223,30 @@ def discover_strategies() -> Dict[str, StrategySpec]:
             except Exception as e:
                 errors[pkg] = f"{type(e).__name__}: {e}"
 
-    # 3) Aday modülleri yükle ve sınıfları topla
+    # 3) aday modülleri yükle ve sınıf/spec üret
     for name in candidates:
         try:
             m = importlib.import_module(name)
             for _, obj in inspect.getmembers(m, _looks_like_strategy_class):
                 qn = f"{obj.__module__}.{obj.__name__}"
+
+                # --- BURASI: family'yi modül yolundan türet ---
+                family = getattr(obj, "family", None)
+                if not family:
+                    mod = obj.__module__
+                    if ".ai." in mod:
+                        family = "ai"
+                    elif ".rule_based." in mod:
+                        family = "rule_based"
+                    elif ".hybrid." in mod:
+                        family = "hybrid"
+                    else:
+                        family = "conventional"
+
                 spec = StrategySpec(
                     qualified_name=qn,
                     display_name=getattr(obj, "name", getattr(obj, "display_name", obj.__name__)),
-                    family=getattr(obj, "family", "conventional"),
+                    family=family,  # <-- burada kullanılıyor
                     module=obj.__module__,
                     cls=obj,
                     param_schema=getattr(obj, "ParamSchema", None),
@@ -236,35 +255,21 @@ def discover_strategies() -> Dict[str, StrategySpec]:
         except Exception as e:
             errors[name] = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=1)}"
 
-    # 4) Hâlâ boşsa, hali hazırda kayıtlı sınıflardan üret (fallback)
-    if not results and STRATEGY_REGISTRY:
-        for key, obj in STRATEGY_REGISTRY.items():
-            if inspect.isclass(obj) and _looks_like_strategy_class(obj):
-                qn = f"{obj.__module__}.{obj.__name__}"
-                spec = StrategySpec(
-                    qualified_name=qn,
-                    display_name=getattr(obj, "name", getattr(obj, "display_name", obj.__name__)),
-                    family=getattr(obj, "family", "conventional"),
-                    module=obj.__module__,
-                    cls=obj,
-                    param_schema=getattr(obj, "ParamSchema", None),
-                )
-                results[qn] = spec
-        if not results:
-            logger.warning("Fallback to STRATEGY_REGISTRY yielded 0 usable classes.")
-
-    # Hataları UI'de gösterebilmek için attribute'a iliştiriyoruz.
-    discover_strategies.errors = errors  # type: ignore[attr-defined]
+    discover_strategies.errors = errors  # UI'de göstermek için
     return results
 
-def get_strategy_class(qualified_name: str) -> Type[BaseStrategy]:
+
+
+def get_strategy_class(qualified_name: str) -> Type:
     module_name, class_name = qualified_name.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, class_name)
 
-def get_param_schema(qualified_name: str) -> Type[StrategyParameters]:
+
+def get_param_schema(qualified_name: str) -> Type[Any]:
     cls = get_strategy_class(qualified_name)
     return getattr(cls, "ParamSchema", StrategyParameters)
+
 
 # -----------------------------------------------------------------------------
 # Dışarıya tek giriş: bootstrap
